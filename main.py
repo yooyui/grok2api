@@ -79,11 +79,22 @@ async def lifespan(app: FastAPI):
         scheduler = get_scheduler(interval)
         scheduler.start()
 
+    # 4. 启动 cf_clearance 自动刷新
+    cf_refresh_enabled = get_config("cf_clearance.enabled", False)
+    if cf_refresh_enabled:
+        from app.services.cf_clearance import start_refresher
+        start_refresher()
+
     logger.info("Application startup complete.")
     yield
 
     # 关闭
     logger.info("Shutting down Grok2API...")
+
+    # Stop cf_clearance refresher
+    if cf_refresh_enabled:
+        from app.services.cf_clearance import stop_refresher
+        await stop_refresher()
 
     # Best-effort: stop auto-register to avoid blocking shutdown on background threads.
     try:

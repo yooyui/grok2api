@@ -101,13 +101,22 @@ class LocalStorage(BaseStorage):
     
     def __init__(self):
         self._lock = asyncio.Lock()
-        
+        # Per-name locks so that unrelated resources (config vs tokens) don't
+        # block each other on Windows where fcntl is unavailable.
+        self._named_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_named_lock(self, name: str) -> asyncio.Lock:
+        """Return a per-name asyncio.Lock, creating it on first access."""
+        if name not in self._named_locks:
+            self._named_locks[name] = asyncio.Lock()
+        return self._named_locks[name]
+
     @asynccontextmanager
     async def acquire_lock(self, name: str, timeout: int = 10):
         if fcntl is None:
             try:
                 async with asyncio.timeout(timeout):
-                    async with self._lock:
+                    async with self._get_named_lock(name):
                         yield
             except asyncio.TimeoutError:
                 logger.warning(f"LocalStorage: 获取锁 '{name}' 超时 ({timeout}s)")
@@ -162,26 +171,44 @@ class LocalStorage(BaseStorage):
     async def save_config(self, data: Dict[str, Any]):
         try:
             lines = []
+            # 收集所有 section（包括嵌套子表）
+            def _write_section(prefix: str, items: dict):
+                flat_keys = {}
+                sub_tables = {}
+                for key, val in items.items():
+                    if isinstance(val, dict):
+                        sub_tables[key] = val
+                    else:
+                        flat_keys[key] = val
+                # 写 section header + 平坦键值
+                if flat_keys or not sub_tables:
+                    lines.append(f"[{prefix}]")
+                    for key, val in flat_keys.items():
+                        lines.append(f"{key} = {_format_value(val)}")
+                    lines.append("")
+                # 递归写子表
+                for key, val in sub_tables.items():
+                    _write_section(f"{prefix}.{key}", val)
+
+            def _format_value(val):
+                if isinstance(val, bool):
+                    return "true" if val else "false"
+                elif isinstance(val, str):
+                    escaped = val.replace('"', '\\"')
+                    return f'"{escaped}"'
+                elif isinstance(val, (int, float)):
+                    return str(val)
+                elif isinstance(val, list):
+                    return json_dumps(val)
+                else:
+                    return f'"{str(val)}"'
+
             for section, items in data.items():
                 if not isinstance(items, dict): continue
-                lines.append(f"[{section}]")
-                for key, val in items.items():
-                    if isinstance(val, bool):
-                        val_str = "true" if val else "false"
-                    elif isinstance(val, str):
-                        escaped = val.replace('"', '\\"')
-                        val_str = f'"{escaped}"'
-                    elif isinstance(val, (int, float)):
-                        val_str = str(val)
-                    elif isinstance(val, (list, dict)):
-                        val_str = json_dumps(val)
-                    else:
-                        val_str = f'"{str(val)}"'
-                    lines.append(f"{key} = {val_str}")
-                lines.append("")
-            
+                _write_section(section, items)
+
             content = "\n".join(lines)
-            
+
             CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
             async with aiofiles.open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 await f.write(content)

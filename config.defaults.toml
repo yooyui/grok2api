@@ -9,6 +9,7 @@ timeout = 120
 base_proxy_url = ""
 asset_proxy_url = ""
 cf_clearance = ""
+cf_user_agent = ""
 max_retry = 3
 retry_status_codes = [401,429,403]
 image_generation_method = "legacy"
@@ -57,3 +58,26 @@ auto_start_solver = true
 solver_debug = false
 max_errors = 0
 max_runtime_minutes = 0
+
+[cf_clearance]
+# 是否启用自动刷新
+enabled = false
+# Provider 优先级列表，按顺序尝试
+providers = ["local", "flaresolverr", "cloudflare_bypass"]
+# 刷新间隔（秒），建议 < cf_clearance 有效期的一半
+refresh_interval = 1200
+# 失败重试最大退避（秒）
+max_backoff = 300
+
+# Local Solver（复用 turnstile solver 进程）
+[cf_clearance.local]
+endpoint = "http://127.0.0.1:18888"
+
+# FlareSolverr / Byparr 兼容 API
+[cf_clearance.flaresolverr]
+endpoint = "http://127.0.0.1:8191/v1"
+max_timeout = 60000
+
+# CloudflareBypassForScraping
+[cf_clearance.cloudflare_bypass]
+endpoint = "http://127.0.0.1:8880"
