@@ -31,46 +31,45 @@ class TokenPool:
     def select(self, bucket: str = "normal") -> Optional[TokenInfo]:
         """
         选择一个可用 Token
-        策略: 
+        策略:
         1. 选择 active 状态且有配额的 token
         2. 优先选择剩余额度最多的
         3. 如果额度相同，随机选择（避免并发冲突）
+
+        单次遍历完成筛选 + 最大值查找。
         """
-        # 选择 token
         if bucket == "heavy":
-            available = [
-                t
-                for t in self._tokens.values()
-                if t.status in (TokenStatus.ACTIVE, TokenStatus.COOLING) and t.heavy_quota != 0
-            ]
+            best_unknown: List[TokenInfo] = []
+            best_known: List[TokenInfo] = []
+            best_quota = 0
+            for t in self._tokens.values():
+                if t.status not in (TokenStatus.ACTIVE, TokenStatus.COOLING) or t.heavy_quota == 0:
+                    continue
+                if t.heavy_quota < 0:
+                    best_unknown.append(t)
+                elif t.heavy_quota > best_quota:
+                    best_quota = t.heavy_quota
+                    best_known = [t]
+                elif t.heavy_quota == best_quota:
+                    best_known.append(t)
 
-            if not available:
-                return None
+            if best_unknown:
+                return random.choice(best_unknown)
+            return random.choice(best_known) if best_known else None
 
-            unknown = [t for t in available if t.heavy_quota < 0]
-            if unknown:
-                return random.choice(unknown)
+        # normal bucket — single pass
+        candidates: List[TokenInfo] = []
+        max_quota = 0
+        for t in self._tokens.values():
+            if t.status != TokenStatus.ACTIVE or t.quota <= 0:
+                continue
+            if t.quota > max_quota:
+                max_quota = t.quota
+                candidates = [t]
+            elif t.quota == max_quota:
+                candidates.append(t)
 
-            max_quota = max(t.heavy_quota for t in available)
-            candidates = [t for t in available if t.heavy_quota == max_quota]
-            return random.choice(candidates)
-
-        available = [
-            t for t in self._tokens.values() 
-            if t.status == TokenStatus.ACTIVE and t.quota > 0
-        ]
-        
-        if not available:
-            return None
-            
-        # 找到最大额度
-        max_quota = max(t.quota for t in available)
-        
-        # 筛选最大额度
-        candidates = [t for t in available if t.quota == max_quota]
-        
-        # 随机选择
-        return random.choice(candidates)
+        return random.choice(candidates) if candidates else None
         
     def count(self) -> int:
         """Token 数量"""

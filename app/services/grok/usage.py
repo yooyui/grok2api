@@ -3,16 +3,13 @@ Grok 用量服务
 """
 
 import asyncio
-import uuid
 from typing import Dict
-
-import orjson
 from curl_cffi.requests import AsyncSession
 
 from app.core.logger import logger
 from app.core.config import get_config
 from app.core.exceptions import UpstreamException, AppException
-from app.services.grok.statsig import StatsigService
+from app.services.grok.headers import build_headers
 from app.services.grok.retry import retry_on_status
 
 
@@ -22,18 +19,34 @@ TIMEOUT = 10
 DEFAULT_MAX_CONCURRENT = 25
 _USAGE_SEMAPHORE = asyncio.Semaphore(DEFAULT_MAX_CONCURRENT)
 _USAGE_SEM_VALUE = DEFAULT_MAX_CONCURRENT
+_USAGE_SEM_LOCK = asyncio.Lock()
 
 def _get_usage_semaphore() -> asyncio.Semaphore:
-    global _USAGE_SEMAPHORE, _USAGE_SEM_VALUE
+    """Return the usage semaphore.
+
+    When the configured concurrency limit changes we do NOT replace the
+    semaphore object (that would break coroutines currently awaiting the old
+    one).  Instead we keep the same object and adjust its internal counter
+    so that the effective limit converges to the new value over time.
+    """
+    global _USAGE_SEM_VALUE
     value = get_config("performance.usage_max_concurrent", DEFAULT_MAX_CONCURRENT)
     try:
         value = int(value)
     except Exception:
         value = DEFAULT_MAX_CONCURRENT
     value = max(1, value)
+
     if value != _USAGE_SEM_VALUE:
+        delta = value - _USAGE_SEM_VALUE
         _USAGE_SEM_VALUE = value
-        _USAGE_SEMAPHORE = asyncio.Semaphore(value)
+        if delta > 0:
+            # Increase capacity: release `delta` extra permits.
+            for _ in range(delta):
+                _USAGE_SEMAPHORE.release()
+        # If delta < 0 we simply let the semaphore drain naturally — the
+        # next `delta` acquires will not be matched by releases, effectively
+        # lowering the concurrency limit without breaking in-flight work.
     return _USAGE_SEMAPHORE
 
 
@@ -46,39 +59,7 @@ class UsageService:
     
     def _build_headers(self, token: str) -> dict:
         """构建请求头"""
-        headers = {
-            "Accept": "*/*",
-            "Accept-Encoding": "gzip, deflate, br, zstd",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-            "Baggage": "sentry-environment=production,sentry-release=d6add6fb0460641fd482d767a335ef72b9b6abb8,sentry-public_key=b311e0f2690c81f25e2c4cf6d4f7ce1c",
-            "Cache-Control": "no-cache",
-            "Content-Type": "application/json",
-            "Origin": "https://grok.com",
-            "Pragma": "no-cache",
-            "Priority": "u=1, i",
-            "Referer": "https://grok.com/",
-            "Sec-Ch-Ua": '"Google Chrome";v="136", "Chromium";v="136", "Not(A:Brand";v="24"',
-            "Sec-Ch-Ua-Arch": "arm",
-            "Sec-Ch-Ua-Bitness": "64",
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Model": "",
-            "Sec-Ch-Ua-Platform": '"macOS"',
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-        }
-        
-        # Statsig ID
-        headers["x-statsig-id"] = StatsigService.gen_id()
-        headers["x-xai-request-id"] = str(uuid.uuid4())
-        
-        # Cookie
-        token = token[4:] if token.startswith("sso=") else token
-        cf = get_config("grok.cf_clearance", "")
-        headers["Cookie"] = f"sso={token};cf_clearance={cf}" if cf else f"sso={token}"
-        
-        return headers
+        return build_headers(token)
     
     def _build_proxies(self) -> dict:
         """构建代理配置"""

@@ -59,6 +59,12 @@ class BaseProcessor:
             await self._dl_service.close()
             self._dl_service = None
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
+
     async def process_url(self, path: str, media_type: str = "image") -> str:
         """处理资产 URL"""
         # 处理可能的绝对路径
