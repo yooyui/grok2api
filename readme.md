@@ -21,63 +21,106 @@
 - 一键部署工作流：`.github/workflows/cloudflare-workers.yml`
   - 一键部署前置条件：仓库需配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`。
 
-## 使用说明
+## 部署说明
 
-### 如何启动
+本项目支持三种部署方式，功能语义一致（Token 管理、API Key 管理、后台接口行为对齐）。
 
-- 本地开发
+### 前置条件
 
-```
+| 部署方式 | 要求 |
+| :------- | :--- |
+| 本地开发 | Python 3.13+、[uv](https://docs.astral.sh/uv/) |
+| Docker | Docker 20+、Docker Compose V2 |
+| Cloudflare Workers | Node.js 18+、`wrangler` CLI、Cloudflare 账号 |
+
+### 方式一：本地开发
+
+```bash
+# 安装依赖
 uv sync
 
+# 启动服务（默认 :8000）
 uv run main.py
 
 # （可选）启动后自检
 python scripts/smoke_test.py --base-url http://127.0.0.1:8000
 ```
 
-- 项目部署
-
-```
-git clone https://github.com/TQZHR/grok2api.git
-
-# 进入项目目录
-cd grok2api
-
-# 直接拉取镜像启动（默认）
-docker compose up -d
-
-# 更新到最新镜像
-docker compose pull
-docker compose up -d
-
-# 从当前仓库源码构建并启动（可选）
-docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
-
-# （可选）启动后自检
-python scripts/smoke_test.py --base-url http://127.0.0.1:8000
-```
-
-### 仓库级部署自检
-
-在执行一键部署前，建议先在仓库根目录运行：
+### 方式二：Docker（推荐生产环境）
 
 ```bash
-uv run pytest -q
-npm run typecheck
-python scripts/check_model_catalog_sync.py
-npx wrangler deploy --dry-run --config wrangler.toml
-docker compose -f docker-compose.yml config
-docker compose -f docker-compose.yml -f docker-compose.build.yml config
+git clone https://github.com/TQZHR/grok2api.git
+cd grok2api
+
+# 1. 拉取镜像启动
+docker compose up -d
+
+# 2. 更新到最新镜像
+docker compose pull && docker compose up -d
+
+# 3. 从源码构建（可选）
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-> 如果拉取镜像时报 `denied`：说明 GHCR 镜像不可匿名拉取（未公开或需要登录）。你可以先执行 `docker login ghcr.io`，或在 `.env` 里设置 `GROK2API_IMAGE` 指向你自己的公开镜像；也可以用上面的 `--build` 从源码构建运行。
+数据持久化：容器内 `/app/data` 和 `/app/logs` 已映射到宿主机 `./data` 和 `./logs`。
 
-> 可选：复制 `.env.example` 为 `.env`，可配置端口/日志/存储等；并可通过 `COMPOSE_PROFILES` 一键启用 `redis/pgsql/mysql`（见 `.env.example` 内示例）。
+存储后端选择（通过 `.env` 配置）：
 
-> 部署一致性说明：本地（FastAPI）/ Docker / Cloudflare Workers 共用同一套管理功能语义（Token 筛选、API Key 管理、后台管理接口语义一致）。
-> 上游关键同步（2026-02-20）：已同步聊天页“重试上一条回答”与“图片加载失败点击重试”，三部署下行为一致。
-> Cloudflare 可通过 `.github/workflows/cloudflare-workers.yml` 一键部署（需先配置上述两个 Secrets），Docker 仍保持 `docker compose up -d` 一键启动。
+| 后端 | `SERVER_STORAGE_TYPE` | `COMPOSE_PROFILES` | 说明 |
+| :--- | :-------------------- | :----------------- | :--- |
+| 本地文件 | `local`（默认） | — | TOML/JSON，零依赖 |
+| Redis | `redis` | `redis` | 适合多 worker 共享状态 |
+| PostgreSQL | `pgsql` | `pgsql` | 关系型持久化 |
+| MySQL | `mysql` | `mysql` | 关系型持久化 |
+
+示例（启用 PostgreSQL）：
+
+```bash
+# .env
+COMPOSE_PROFILES=pgsql
+SERVER_STORAGE_TYPE=pgsql
+PGSQL_PASSWORD=change_me
+SERVER_STORAGE_URL=postgresql+asyncpg://grok2api:change_me@pgsql:5432/grok2api
+```
+
+> 如果拉取镜像时报 `denied`：GHCR 镜像未公开或需要登录。可先 `docker login ghcr.io`，或在 `.env` 设置 `GROK2API_IMAGE` 指向自有镜像，也可用 `--build` 从源码构建。
+
+### 方式三：Cloudflare Workers
+
+详见 [`README.cloudflare.md`](README.cloudflare.md)，要点：
+
+- 存储：D1（SQLite）持久化 + KV 缓存图片/视频
+- 一键部署：`.github/workflows/cloudflare-workers.yml`（需配置 `CLOUDFLARE_API_TOKEN` 与 `CLOUDFLARE_ACCOUNT_ID`）
+- 手动部署：`npm install && npx wrangler deploy`
+
+### 反向代理（可选）
+
+如需通过 Nginx/Caddy 反向代理，注意：
+
+- 转发 `Host`、`X-Real-IP`、`X-Forwarded-For` 头
+- 流式响应需关闭代理缓冲（Nginx: `proxy_buffering off;`）
+- WebSocket 升级（如使用实验性生图）：`proxy_set_header Upgrade $http_upgrade;`
+
+### 部署自检
+
+部署完成后建议运行：
+
+```bash
+# Python 测试
+uv run pytest -q
+
+# Workers 类型检查
+npm run typecheck
+
+# 模型目录一致性
+python scripts/check_model_catalog_sync.py
+
+# Docker Compose 配置校验
+docker compose -f docker-compose.yml config
+
+# （可选）冒烟测试
+python scripts/smoke_test.py --base-url http://127.0.0.1:8000
+```
 
 ### 管理面板
 
@@ -194,6 +237,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml config
 | `grok-4.1-thinking`      |  4  | Basic/Super |   支持   |   支持   |    -    |
 | `grok-4.20-beta`         |  1  | Basic/Super |   支持   |   支持   |    -    |
 | `grok-imagine-1.0`       |  -  | Basic/Super |    -    |   支持   |    -    |
+| `grok-imagine-1.0-fast`  |  -  | Basic/Super |    -    |   支持   |    -    |
 | `grok-imagine-1.0-edit`  |  -  | Basic/Super |    -    |   支持   |    -    |
 | `grok-imagine-1.0-video` |  -  | Basic/Super |    -    |    -    |   支持   |
 
@@ -406,25 +450,42 @@ curl http://localhost:8000/v1/images/edits \
 |                       | `usage_max_concurrent`     | 用量并发上限 | 用量查询请求的并发上限。推荐 25。                    | `25`                                                    |
 |                       | `assets_delete_batch_size` | 资产清理批量 | 在线资产删除单批并发数量。推荐 10。                  | `10`                                                    |
 |                       | `admin_assets_batch_size`  | 管理端批量   | 管理端在线资产统计/清理批量并发数量。推荐 10。       | `10`                                                    |
+| **cf_clearance** | `enabled`               | 启用自动刷新 | 是否启用 cf_clearance 自动刷新。                     | `false`                                                 |
+|                       | `providers`              | Provider 列表 | 按优先级尝试的 Provider 名称列表。                   | `["local", "flaresolverr", "cloudflare_bypass"]`        |
+|                       | `refresh_interval`       | 刷新间隔     | 刷新间隔（秒），建议小于 cf_clearance 有效期的一半。 | `1200`                                                  |
+|                       | `max_backoff`            | 最大退避     | 全部 Provider 失败后重试的最大退避时间（秒）。       | `300`                                                   |
+|                       | `local.endpoint`         | Local 端点   | 本地 Solver 端点（复用 Turnstile Solver 进程）。     | `http://127.0.0.1:18888`                                |
+|                       | `flaresolverr.endpoint`  | FlareSolverr 端点 | FlareSolverr / Byparr 兼容 API 端点。            | `http://127.0.0.1:8191/v1`                              |
+|                       | `flaresolverr.max_timeout` | FlareSolverr 超时 | FlareSolverr 请求超时（毫秒）。                  | `60000`                                                 |
+|                       | `cloudflare_bypass.endpoint` | Bypass 端点 | CloudflareBypassForScraping 端点。                | `http://127.0.0.1:8880`                                 |
 
 <br>
 
-## 本次修复
+## cf_clearance 自动刷新（本地/Docker）
 
-- 修复 Token 页 `refreshStatus` 依赖全局 `event` 的问题，改为显式传入按钮引用，避免不同运行环境下按钮状态异常。
-- 新增 Token 统一归一化（`normalizeSsoToken`），修复 `sso=` 前缀导致的去重、导入、批量选择不一致问题。
-- 修复 API Key 更新接口“key 不存在仍返回成功”问题，统一为 `404`。
-- 优化 Token/API Key 页面错误提示，优先展示后端具体错误（`detail/error/message`）。
+当 Grok 启用 Cloudflare 质询时，可开启 `cf_clearance` 自动刷新，后台定时获取新 cookie 并注入请求头。
 
-## 本次更新补充（本地/Docker）
+- 启用：将 `cf_clearance.enabled` 设为 `true`
+- Provider 链：按 `cf_clearance.providers` 列表顺序依次尝试，任一成功即停止
+  - `local` — 复用本地 Turnstile Solver 进程（需先启动 solver）
+  - `flaresolverr` — 兼容 FlareSolverr / Byparr API
+  - `cloudflare_bypass` — CloudflareBypassForScraping
+- 刷新策略：成功后按 `refresh_interval`（默认 1200s）等待下次刷新；全部失败时指数退避重试（上限 `max_backoff` 秒）
+- 仅 Python/FastAPI 运行时可用；Cloudflare Workers 侧不适用
 
-- 新增：导入/手动添加/外部写入新增 Token 后，会在后台自动执行 `同意协议 + 设置年龄 + 开启 NSFW`。
-- 新增：Token 管理页增加「一键刷新 NSFW」按钮，默认对全部 Token 执行上述流程。
-- 新增：批量刷新默认并发 `10`，失败后额外重试 `3` 次；重试耗尽自动标记为失效。
-- 新增配置：
-  - `token.nsfw_refresh_concurrency`（默认 `10`）
-  - `token.nsfw_refresh_retries`（默认 `3`）
-- 说明：该功能仅在 `python-fastapi`（本地/Docker）开放；`cloudflare-workers` 侧不展示该按钮。
+## 最近更新
+
+### 性能优化
+
+- 请求统计 debounce 写入（5s 合并），高并发下减少 90%+ 磁盘 I/O
+- TokenPool 选择改为单次遍历，消除 2-3 次重复扫描
+- 共享请求头模板收敛，净减 ~70 行重复代码
+
+### Bug 修复
+
+- 信号量竞态：动态调整内部计数器，避免旧信号量协程失去并发控制
+- 流式 processor 资源泄漏：确保消费者断开时 session 被清理
+- Windows 锁退化：per-name `asyncio.Lock` 替代全局锁
 
 ## Star History
 
